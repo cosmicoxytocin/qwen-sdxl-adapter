@@ -1,0 +1,53 @@
+[project]
+name = "qwen-sdxl-adapter"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=0.28.0",
+    "diffusers>=0.27.0",
+    "numpy>=2.4.2",
+    "pillow>=12.1.1",
+    "pyyaml>=6.0.3",
+    "torch>=2.1.0",
+    "torchvision>=0.25.0",
+    "tqdm>=4.67.3",
+    "transformers>=4.38.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.15.5",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = [
+    ".mypy_cache",
+    ".ruff_cache",
+    "venv",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I"
+]
+ignore = [
+    "E501",
+    "F401",
+    "F841",
+    "I001",
+    "UP006",
+    "W293",
+    "W292"
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
