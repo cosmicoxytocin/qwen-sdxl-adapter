@@ -27,7 +27,11 @@ class DataConfig:
     batch_size: int = 4
     num_workers: int = 4
     caption_dropout_prob: float = 0.1       # For Classifier-Free Guidance
-    empty_prompt_token: str = ""
+    empty_prompt_token: str = ""            # NOTE: When applying 'Caption Dropout', the qwen tokenizer might output a single sequence consisting of
+                                            # just the `<|endoftext|>` token, padding the rest of the 256 slots.
+                                            # Ensure that the tokenizer pipeline enforces than an 'empty' string will resolve
+                                            # to at least ONE valid token (the BOS or EOS token)
+                                            # so the mask has at least one True value, giving the softmax a valid denominator.
 
 
 @dataclass
