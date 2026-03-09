@@ -84,8 +84,11 @@ def load_config(yaml_path: Optional[str] = None, cli_args: Optional[list[str]] =
     
     # Merge CLI overrides if provided
     if cli_args:
-        cli_config = OmegaConf.from_dotlist(cli_args)
-        config = OmegaConf.merge(config, cli_config)
+        # Filter out empty strings and non-override arguments
+        cli_args = [arg for arg in cli_args if "=" in arg]
+        if cli_args:
+            cli_config = OmegaConf.from_dotlist(cli_args)
+            config = OmegaConf.merge(config, cli_config)
     
     # Resolve
     return OmegaConf.to_object(config)
