@@ -24,7 +24,14 @@ class CachedAdapterDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         file_path = self.files[idx]
-        data = torch.load(file_path, weights_only=True)
+        data = torch.load(file_path, weights_only=False)
+
+        # Validate that the loaded data is a dictionary with expected keys
+        if not isinstance(data, dict):
+            raise TypeError(
+                f"Expected dict from {file_path}, got {type(data).__name__}. "
+                f"Re-run cache_dataset.py to regenerate the cache."
+            )
 
         # Classifier-Free Guidance (CFG) Dropout
         # Randomly replaces the conditional prompt with the unconditional prompt
