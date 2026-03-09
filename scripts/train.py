@@ -1,15 +1,19 @@
 """Main training entry point for the QWEN-SDXL-Adapter."""
 
 import argparse
-from models.bridge import CausalToSpatialPerceiverBridge
 import random
 import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from typing import List
 
 import numpy as np
 import torch
 from diffusers import UNet2DConditionModel, DDPMScheduler
 
+from src.models.bridge import CausalToSpatialPerceiverBridge
 from src.config import load_config, ExperimentConfig
 from src.data.dataset import create_dataloader
 from src.training.loss import Diff2FlowAlignmentLoss
@@ -29,7 +33,7 @@ def main(config: ExperimentConfig) -> None:
     """Main training function."""
     # 1. Device & Reproducibility
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    set_seed(config.traning.seed)
+    set_seed(config.training.seed)
 
     print(f"Initializing Qwen-SDXL Adapter Training on device: {device}")
     print(f"Mixed Precision: {config.training.mixed_precision}")

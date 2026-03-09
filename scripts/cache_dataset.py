@@ -127,7 +127,7 @@ def cache_dataset(
             "uncond_mask": uncond_mask                          # [256]
         }
         out_file = os.path.join(cache_dir, f"{base_name}.pt")
-        torch.save(cache_dir, out_file)
+        torch.save(cache_data, out_file)
 
 
 if __name__ == "__main__":

@@ -136,7 +136,7 @@ class AdapterTrainer:
                             if self.config.logging.track_grad_norms:
                                 logs["train/grad_norm"] = grad_norm.item()
                             
-                            wandb.log(logs, steps=self.global_step)
+                            wandb.log(logs, step=self.global_step)
                             progress_bar.set_postfix(**logs)
                         
                         # 6. Checkpointing

@@ -60,7 +60,7 @@ class AsymmetricRoPECrossAttention(nn.Module):
         self,
         q_x: torch.Tensor,
         kv_x: torch.Tensor,
-        masK: Optional[torch.Tensor] = None
+        mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Forward pass of the cross-attention mechanism."""
         b, n_q, _ = q_x.shape
