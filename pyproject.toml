@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Causal-to-Spatial Perceiver Bridge mapping Qwen3.5-Base to SDXL using Flow Matching."
 readme = "README.md"
 requires-python = ">=3.12"
+scripts = { "train" = "scripts/train.py", "inference" = "scripts/inference.py" }
 dependencies = [
     "accelerate>=0.29.0",
     "diffusers>=0.29.0",
