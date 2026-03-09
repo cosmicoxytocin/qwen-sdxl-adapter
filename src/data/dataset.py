@@ -54,11 +54,21 @@ class CachedAdapterDataset(Dataset):
 def create_dataloader(config: DataConfig) -> DataLoader:
     """Instantiates the DataLoader with optimal multithreading parameters."""
     dataset = CachedAdapterDataset(config)
+
+    if len(dataset) < config.batch_size:
+        print(
+            f"WARNING: Dataset size ({len(dataset)}) is smaller than batch_size ({config.batch_size}). "
+            f"Setting drop_last=False to avoid empty DataLoader."
+        )
+        drop_last = False
+    else:
+        drop_last = True
+
     return DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=drop_last,
     )

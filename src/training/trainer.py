@@ -76,6 +76,13 @@ class AdapterTrainer:
         """Main training loop."""
         print(f"Starting training on {self.device} for {self.config.training.max_train_steps} steps...")
 
+        if len(self.train_dataloader) == 0:
+            raise ValueError(
+                f"DataLoader is empty! Dataset has {len(self.train_dataloader.dataset)} samples "
+                f"but batch_size={self.train_dataloader.batch_size} with drop_last=True. "
+                f"Add more data or reduce batch_size."
+            )
+
         self.adapter.train()
         self.unet.eval()  # UNet is frozen
 
