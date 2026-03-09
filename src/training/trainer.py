@@ -80,6 +80,7 @@ class AdapterTrainer:
         self.unet.eval()  # UNet is frozen
 
         progress_bar = tqdm(total=self.config.training.max_train_steps, desc="Training")
+        micro_step = 0
 
         while self.global_step < self.config.training.max_train_steps:
             for batch in self.train_dataloader:
@@ -109,8 +110,10 @@ class AdapterTrainer:
                     # 3. Backpropagation
                     self.scaler.scale(loss).backward()
 
+                    micro_step += 1
+
                     # 4. Optimizer Step (Applying accumulated gradients)
-                    if (progress_bar.n + 1) % self.config.training.gradient_accumulation_steps == 0:
+                    if micro_step % self.config.training.gradient_accumulation_steps == 0:
                         # Unscale gradients for clipping
                         self.scaler.unscale_(self.optimizer)
                         grad_norm = torch.nn.utils.clip_grad_norm_(
