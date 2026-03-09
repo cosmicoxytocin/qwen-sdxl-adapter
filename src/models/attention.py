@@ -84,11 +84,11 @@ class AsymmetricRoPECrossAttention(nn.Module):
         # dots: [B, heads, N_q, N_kv]
         dots = (q @ k.transpose(-2, -1)) * self.scale
 
-        if mask is not None:  # noqa: F821
+        if mask is not None:
             # mask: [B, N_kv] -> [B, 1, 1, N_kv]
-            mask = mask.view(b, 1, 1, n_kv)  # noqa: F821
-            # Fill maked positions with negative infinity
-            dots = dots.maked_fill(~mask, torch.finfo(dots.dtype).min)
+            mask = mask.view(b, 1, 1, n_kv)
+            # Fill masked positions with negative infinity
+            dots = dots.masked_fill(~mask, torch.finfo(dots.dtype).min)
         
         # attn: [B, heads, N_q, N_kv]
         attn = dots.softmax(dim=-1)
