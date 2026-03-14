@@ -9,5 +9,5 @@ wheels/
 # Virtual environments
 .venv
 
-# Configs
-configs/
+# test configs
+configs/test_config.yaml
