@@ -1,19 +1,22 @@
 [project]
 name = "qwen-sdxl-adapter"
 version = "0.1.0"
-description = "Add your description here"
+description = "Causal-to-Spatial Perceiver Bridge mapping Qwen3.5-Base to SDXL using Flow Matching."
 readme = "README.md"
 requires-python = ">=3.12"
+scripts = { "train" = "scripts/train.py", "inference" = "scripts/inference.py" }
 dependencies = [
-    "accelerate>=0.28.0",
-    "diffusers>=0.27.0",
-    "numpy>=2.4.2",
-    "pillow>=12.1.1",
-    "pyyaml>=6.0.3",
-    "torch>=2.1.0",
-    "torchvision>=0.25.0",
-    "tqdm>=4.67.3",
-    "transformers>=4.38.0",
+    "accelerate>=0.29.0",
+    "diffusers>=0.29.0",
+    "numpy>=1.26.0",
+    "omegaconf>=2.3.0",
+    "pillow>=10.2.0",
+    "safetensors>=0.4.2",
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "tqdm>=4.66.0",
+    "transformers>=4.40.0",
+    "wandb>=0.16.0",
 ]
 
 [dependency-groups]
