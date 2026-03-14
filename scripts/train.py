@@ -11,9 +11,11 @@ from typing import List
 
 import numpy as np
 import torch
-from diffusers import UNet2DConditionModel, DDPMScheduler
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from diffusers import UNet2DConditionModel, DDPMScheduler, AutoencoderKL
 
 from src.models.bridge import CausalToSpatialPerceiverBridge
+from src.models.sampler import Diff2FlowEulerSampler
 from src.config import load_config, ExperimentConfig
 from src.data.dataset import create_dataloader
 from src.training.loss import Diff2FlowAlignmentLoss
@@ -84,11 +86,35 @@ def main(config: ExperimentConfig) -> None:
         device=device
     )
 
-    # 6. Initialize DataLoader
+    # 6. Runtime validation
+    qwen = tokenizer = vae = sampler = None
+    if config.training.validation_steps > 0:
+        print("Loading Qwen and VAE into VRAM for runtime validation...")
+        tokenizer = AutoTokenizer.from_pretrained(config.model.qwen_model_id, trust_remote_code=True)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        qwen = AutoModelForCausalLM.from_pretrained(
+            config.model.qwen_model_id,
+            torch_dtype=unet_dtype
+        ).to(device)
+        qwen.eval()
+        qwen.requires_grad_(False)
+
+        vae = AutoencoderKL.from_pretrained(
+            "madebyollin/sdxl-vae-fp16-fix",
+            torch_dtype=unet_dtype
+        ).to(device)
+        vae.eval()
+        vae.requires_grad_(False)
+
+        sampler = Diff2FlowEulerSampler(noise_scheduler, device)
+
+    # 7. Initialize DataLoader
     print(f"Loading cached dataset from {config.data.cache_dir}...")
     train_dataloader = create_dataloader(config.data)
 
-    # 7. Initialize & Run Trainer
+    # 8. Initialize & Run Trainer
     print("Starting training loop...")
     trainer = AdapterTrainer(
         config=config,
@@ -97,6 +123,10 @@ def main(config: ExperimentConfig) -> None:
         objective=objective,
         train_dataloader=train_dataloader,
         device=device,
+        qwen=qwen,
+        tokenizer=tokenizer,
+        vae=vae,
+        sampler=sampler
     )
     try:
         trainer.train()

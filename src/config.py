@@ -46,10 +46,13 @@ class TrainingConfig:
     max_train_steps: int = 10000
     gradient_accumulation_steps: int = 4
     max_grad_norm: float = 1.0
-    lr_scheduler: str = "cosine"          # ['linear', 'cosine', "cosine_annealing", 'cosine_with_restarts', 'polynomial', 'constant', 'constant_with_warmup']
+    lr_scheduler: str = "cosine"          # TODO: ['linear', 'cosine', "cosine_annealing", 'cosine_with_restarts', 'polynomial', 'constant', 'constant_with_warmup']
     lr_warmup_steps: int = 500
     checkpointing_steps: int = 1000
     validation_steps: int = 500
+    resume_from_checkpoint: Optional[str] = None # e.g., "./checkpoints/step_5000"
+    save_optimizer_state: bool = True
+
 
 
 @dataclass
