@@ -1,5 +1,6 @@
-from .dataset import create_dataloader
+from .dataset import CachedAdapterDataset, create_dataloader
 
-all = [
+__all__ = [
+    "CachedAdapterDataset",
     "create_dataloader"
 ]
