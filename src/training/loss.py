@@ -15,8 +15,10 @@ class Diff2FlowAlignmentLoss(nn.Module):
         super().__init__()
         self.device = device
 
-        # Extract base scheduler parameters
+        # 1. Extract and ENFORCE ZERO-TERMINAL SNR on Betas
         betas = noise_scheduler.betas.to(dtype=torch.float32, device=device)
+        betas = self._enforce_zero_terminal_snr(betas)
+
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
 
@@ -40,6 +42,27 @@ class Diff2FlowAlignmentLoss(nn.Module):
 
         # Flipped for torch searchsorted (requires monotonically increasing)
         self.rectified_alphas_flipped = torch.flip(self.rectified_alphas, dims=[0])
+
+    def _enforce_zero_terminal_snr(self, betas: torch.Tensor) -> torch.Tensor:
+        """Rescales the beta schedule to ensure mathematically pure noise at T."""
+        alphas = 1.0 - betas
+        alphas_bar = torch.cumprod(alphas, dim=0)
+        alphas_bar_sqrt = torch.sqrt(alphas_bar)
+
+        # Store old limits
+        alphas_bar_sqrt_0 = alphas_bar_sqrt[0].clone()
+        alphas_bar_sqrt_T = alphas_bar_sqrt[-1].clone()
+
+        # Shift so last timestep is exactly zero
+        alphas_bar_sqrt -= alphas_bar_sqrt_T
+        # Scale so first timestep remains unchanged
+        alphas_bar_sqrt *= alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
+
+        alphas_bar = alphas_bar_sqrt ** 2
+        alphas = alphas_bar[1:] / alphas_bar[:-1]
+        alphas = torch.cat([alphas_bar[0:1], alphas])
+        
+        return 1.0 - alphas
 
     def _convert_fm_t_to_dm_t(self, fm_t: torch.Tensor) -> torch.Tensor:
         """Converts Flow Matching time [0, 1] to Diffusion time [0, 1000]."""
@@ -86,18 +109,7 @@ class Diff2FlowAlignmentLoss(nn.Module):
         x1: torch.Tensor,
         micro_conds: torch.Tensor
     ) -> torch.Tensor:
-        """Executes the forward pass to compute the Flow Matching alignment calculation.
-        
-        Args:
-            unet: The frozen SDXL UNet.
-            adapter_ctx: Translated context embeddings [B, 77, 2048].
-            adapter_pooled: Translated pooled embeddings [B, 1280].
-            x1: The target VAE latent (data) [B, 4, 128, 128].
-            micro_conds: SDXL added time_ids [B, 6].
-        
-        Returns:
-            The scalar MSE loss representing the Flow Matching velocity error.
-        """
+        """Executes the forward pass to compute the Flow Matching alignment calculation."""
         b, c, h, w = x1.shape
         device, dtype = x1.device, x1.dtype
 
@@ -121,7 +133,7 @@ class Diff2FlowAlignmentLoss(nn.Module):
             "time_ids": micro_conds
         }
 
-        # 4. Predict Epsilon using the frozen UNet coditioned by the adapter
+        # 4. Predict Epsilon using the frozen UNet conditioned by the adapter
         # NOTE: Don't track gradients for the UNet, only the Adapter context
         eps_pred = unet(
             dm_xt,
