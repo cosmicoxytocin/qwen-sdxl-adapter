@@ -16,7 +16,7 @@ from safetensors.torch import load_file
 
 from src.models.bridge import CausalToSpatialPerceiverBridge
 from src.config import ModelConfig
-from src.models.sampler import Diff2FlowEulerSampler  # <-- IMPORTING MODULAR SAMPLER
+from src.models.sampler import Diff2FlowEulerSampler
 
 
 @torch.no_grad()
