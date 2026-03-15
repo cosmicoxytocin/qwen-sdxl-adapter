@@ -125,7 +125,7 @@ class AdapterTrainer:
 
     @torch.no_grad()
     def generate_validation_samples(self) -> None:
-        """Kohya-style runtime image sampling. Evaluates current adapter weights."""
+        """Kohya-ss/sd-scripts runtime image sampling. Evaluates current adapter weights."""
         if not all([self.qwen, self.tokenizer, self.vae, self.sampler]):
             print("[Warning] Missing validation modules. Skipping generation.")
             return
