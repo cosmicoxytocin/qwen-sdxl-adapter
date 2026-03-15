@@ -44,15 +44,22 @@ def main(config: ExperimentConfig) -> None:
     logger = WandbLogger(config)
 
     # 3. Load frozen SDXL Unet and Noise Scheduler
-    print(f"Loading frozen SDXL UNet from: {config.model.sdxl_model_id}...")
-
     # Load UNet directly into the the target precision to save RAM/VRAM during init
     unet_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
-    unet = UNet2DConditionModel.from_pretrained(
-        config.model.sdxl_model_id,
-        subfolder="unet",
-        torch_dtype=unet_dtype,
-    ).to(device)
+
+    if getattr(config.model, 'sdxl_single_file_ckpt', None):
+        print(f"Loading SDXL Unet from: {config.model.sdxl_single_file_ckpt} with dtype={unet_dtype}...")
+        unet = UNet2DConditionModel.from_single_file(
+            config.model.sdxl_single_file_ckpt,
+            torch_dtype=unet_dtype
+        ).to(device)
+    else:
+        print(f"Loading SDXL Unet from Hugging Face with dtype={unet_dtype}...")
+        unet = UNet2DConditionModel.from_pretrained(
+            config.model.sdxl_model_id,
+            subfolder="unet",
+            torch_dtype=unet_dtype
+        ).to(device)
 
     # Freeze UNet parameters
     unet.requires_grad_(False)

@@ -46,9 +46,19 @@ def generate_image(
     vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype).to(device)
     vae.eval()
 
-    unet = UNet2DConditionModel.from_pretrained(
-        config.sdxl_model_id, subfolder="unet", torch_dtype=dtype
-    ).to(device)
+    if getattr(config, 'sdxl_single_file_ckpt', None):
+        print(f"Loading SDXL UNet from: {config.sdxl_single_file_ckpt}...")
+        unet = UNet2DConditionModel.from_single_file(
+            config.sdxl_single_file_ckpt,
+            torch_dtype=dtype
+        ).to(device)
+    else:
+        print("Loading SDXL UNet from Hugging Face...")
+        unet = UNet2DConditionModel.from_pretrained(
+            config.sdxl_model_id,
+            subfolder="unet",
+            torch_dtype=dtype
+        ).to(device)
     unet.eval()
 
     noise_scheduler = DDPMScheduler.from_pretrained(config.sdxl_model_id, subfolder="scheduler")

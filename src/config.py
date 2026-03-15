@@ -10,6 +10,7 @@ class ModelConfig:
     """Configuration for the Causal-to-Spatial Perceiver Bridge model."""
     qwen_model_id: str = "Qwen/Qwen3.5-0.8B-Base"
     sdxl_model_id: str = "stabilityai/stable-diffusion-xl-base-1.0"
+    sdxl_single_file_ckpt: Optional[str] = None
     adapter_depth: int = 6
     adapter_dim: int = 1024
     adapter_heads: int = 16
