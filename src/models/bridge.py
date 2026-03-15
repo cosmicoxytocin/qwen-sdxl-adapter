@@ -11,17 +11,17 @@ from .attention import AsymmetricRoPECrossAttention
 class RMSNorm(nn.Module):
     """Root Mean Square Normalization."""
 
-    def __init__(self, dim: int, eps:float = 1e-6) -> None:
+    def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Normalizes the input tensor using RMSNorm."""
         # Variance calculation in float32 for stability
         variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
         x_norm = x * torch.rsqrt(variance + self.eps)
-        return (x_norm.to(x.dtype) * self.weight)
+        return x_norm.to(x.dtype) * self.weight
 
 
 class SwiGLU(nn.Module):
@@ -43,7 +43,7 @@ class SwiGLU(nn.Module):
         nn.init.xavier_uniform_(self.w1.weight)
         nn.init.xavier_uniform_(self.w2.weight)
         nn.init.xavier_uniform_(self.w3.weight)
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Applies the SwiGLU activation function."""
         # x: [B, Seq, Dim] -> [B, Seq, Hidden]
@@ -56,21 +56,14 @@ class CSPBBlock(nn.Module):
     def __init__(self, dim: int = 1024, heads: int = 16) -> None:
         super().__init__()
         self.norm1 = RMSNorm(dim)
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=heads,
-            batch_first=True
-        )
+        self.self_attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, batch_first=True)
         self.norm2 = RMSNorm(dim)
         self.cross_attn = AsymmetricRoPECrossAttention(dim=dim, heads=heads)
         self.norm3 = RMSNorm(dim)
         self.mlp = SwiGLU(dim=dim)
-    
+
     def forward(
-        self,
-        x: torch.Tensor,
-        context: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, context: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Forward pass through the block."""
         # 1. Self-Attention with residual connection
@@ -97,7 +90,7 @@ class CausalToSpatialPerceiverBridge(nn.Module):
         internal_dim: int = 1024,
         sdxl_context_dim: int = 2048,
         sdxl_pooled_dim: int = 1280,
-        num_queries: int = 78
+        num_queries: int = 78,
     ) -> None:
         super().__init__()
         self.num_queries = num_queries
@@ -107,9 +100,7 @@ class CausalToSpatialPerceiverBridge(nn.Module):
         self.latent_queries = nn.Parameter(torch.randn(1, num_queries, internal_dim))
 
         # Adapter blocks
-        self.blocks = nn.ModuleList([
-            CSPBBlock(dim=internal_dim) for _ in range(depth)
-        ])
+        self.blocks = nn.ModuleList([CSPBBlock(dim=internal_dim) for _ in range(depth)])
 
         # Manifold output projections
         # Projects the first 77 tokens from 1024 to 2048
@@ -119,34 +110,32 @@ class CausalToSpatialPerceiverBridge(nn.Module):
         self.pool_proj = nn.Sequential(
             nn.Linear(internal_dim, internal_dim),
             nn.SiLU(),
-            nn.Linear(internal_dim, sdxl_pooled_dim)
+            nn.Linear(internal_dim, sdxl_pooled_dim),
         )
 
         self._init_weights()
-    
+
     def _init_weights(self) -> None:
         """Initialize parameters for stable training."""
         nn.init.normal_(self.latent_queries, std=0.02)
         nn.init.xavier_uniform_(self.ctx_proj.weight)
         if self.ctx_proj.bias is not None:
             nn.init.zeros_(self.ctx_proj.bias)
-    
+
     def forward(
-        self,
-        qwen_hidden_states: torch.Tensor,
-        qwen_mask: Optional[torch.Tensor] = None
+        self, qwen_hidden_states: torch.Tensor, qwen_mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass through the Adapter.
-        
+
         Translates causal LLM states into SDXL spatial manifolds.
-        
+
         Args:
             qwen_hidden_states: Cached output from Qwen3.5.
                 - Shape: [B, N, 1024].
             qwen_mask: Optional Boolean mask where True is valid text.
                 - Shape: [B, N].
-        
+
         Returns:
             A tuple containing:
                 - sdxl_context: Spatial cross-attention embeddings for SDXL.
@@ -163,11 +152,11 @@ class CausalToSpatialPerceiverBridge(nn.Module):
         # Pass through the Perceiver Resampler blocks
         for block in self.blocks:
             x = block(x, context=qwen_hidden_states, mask=qwen_mask)
-        
+
         # Manifold routing
         # Split the sequence into Context (slots 0-76) and Pooled (slot 77)
-        ctx_latents = x[:, :77, :]          # [B, 77, 1024]
-        cls_latent = x[:, 77, :]            # [B, 1024]
+        ctx_latents = x[:, :77, :]  # [B, 77, 1024]
+        cls_latent = x[:, 77, :]  # [B, 1024]
 
         # Project to target topological manifolds
         # sdxl_context: [B, 77, 2048]

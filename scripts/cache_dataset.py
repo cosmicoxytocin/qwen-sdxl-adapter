@@ -14,6 +14,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from PIL import Image
 from tqdm import tqdm
 
+
 def get_image_paths(data_dir: str) -> List[str]:
     """Find all common image files in the target directory."""
     extensions = ("*.jpg", "*.jpeg", "*.png", "*.webp")
@@ -21,6 +22,7 @@ def get_image_paths(data_dir: str) -> List[str]:
     for ext in extensions:
         files.extend(glob.glob(os.path.join(data_dir, ext)))
     return files
+
 
 @torch.no_grad()
 def cache_dataset(
@@ -30,7 +32,7 @@ def cache_dataset(
     sdxl_vae_id: str = "madebyollin/sdxl-vae-fp16-fix",
     image_size: int = 1024,
     max_seq_length: int = 256,
-    device: str = "cuda"
+    device: str = "cuda",
 ) -> None:
     """Process and cache VAE latents and LLM hidden states."""
     os.makedirs(cache_dir, exist_ok=True)
@@ -45,9 +47,7 @@ def cache_dataset(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     qwen = AutoModelForCausalLM.from_pretrained(
-        qwen_model_id,
-        torch_dtype=torch.bfloat16,
-        device_map=device
+        qwen_model_id, torch_dtype=torch.bfloat16, device_map=device
     )
     qwen.eval()
 
@@ -71,22 +71,26 @@ def cache_dataset(
 
             # Encode to latent [1, 4, 128, 128]
             latent_dist = vae.encode(img_tensor).latent_dist
-            latent = latent_dist.sample() * vae.config.scaling_factor  # Scale by VAE factor (default 0.18215)
+            latent = (
+                latent_dist.sample() * vae.config.scaling_factor
+            )  # Scale by VAE factor (default 0.18215)
 
             # Save SDXL micro-conditioning stats: (original_h, original_w, crop_y, crop_x, target_h, target_w)
             crop_y = (h - min_dim) // 2
             crop_x = (w - min_dim) // 2
-            micro_conds = torch.tensor([h, w, crop_y, crop_x, image_size, image_size], dtype=torch.float32)
+            micro_conds = torch.tensor(
+                [h, w, crop_y, crop_x, image_size, image_size], dtype=torch.float32
+            )
         except Exception as e:
             print(f"Failed to process image {img_path}: {e}")
             continue
-        
+
         # 2. Text Processing & Qwen Hidden State Caching
         prompt = ""
         if os.path.exists(txt_path):
             with open(txt_path, "r", encoding="utf-8") as f:
                 prompt = f.read().strip()
-        
+
         # Cache the unconditional ('empty') prompt for CFG
         prompts = [prompt, ""]  # [conditional, unconditional]
 
@@ -96,16 +100,14 @@ def cache_dataset(
             padding="max_length",
             truncation=True,
             max_length=max_seq_length,
-            return_tensors="pt"
+            return_tensors="pt",
         ).to(device)
 
         # Forward pass through Qwen to get last hidden state
         # `output.hidden_states` isn't needed if we take the standard output for causal LM
         # but AutoModelForCausalLM outputs logits. Need base model's hidden states
         outputs = qwen.model(
-            input_ids=encode.input_ids,
-            attention_mask=encode.attention_mask,
-            return_dict=True
+            input_ids=encode.input_ids, attention_mask=encode.attention_mask, return_dict=True
         )
         # [2, 256, 1024]
         hidden_states = outputs.last_hidden_state.detach().cpu()
@@ -119,12 +121,12 @@ def cache_dataset(
 
         # 3. Save to disk as a single dictionary
         cache_data = {
-            "vae_latents": latent.squeeze(0).cpu(),             # [4, 128, 128]
-            "micro_conds": micro_conds,                         # [6]
-            "cond_hidden": cond_hidden,                         # [256, 1024]
-            "cond_mask": cond_mask,                             # [256]
-            "uncond_hidden": uncond_hidden,                     # [256, 1024]
-            "uncond_mask": uncond_mask                          # [256]
+            "vae_latents": latent.squeeze(0).cpu(),  # [4, 128, 128]
+            "micro_conds": micro_conds,  # [6]
+            "cond_hidden": cond_hidden,  # [256, 1024]
+            "cond_mask": cond_mask,  # [256]
+            "uncond_hidden": uncond_hidden,  # [256, 1024]
+            "uncond_mask": uncond_mask,  # [256]
         }
         out_file = os.path.join(cache_dir, f"{base_name}.pt")
         torch.save(cache_data, out_file)
@@ -134,7 +136,14 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--raw_data_dir", type=str, required=True, help="Directory containing raw images and prompts.")
-    parser.add_argument("--cache_dir", type=str, required=True, help="Output path for cached .pt tensors.")
+    parser.add_argument(
+        "--raw_data_dir",
+        type=str,
+        required=True,
+        help="Directory containing raw images and prompts.",
+    )
+    parser.add_argument(
+        "--cache_dir", type=str, required=True, help="Output path for cached .pt tensors."
+    )
     args = parser.parse_args()
     cache_dataset(args.raw_data_dir, args.cache_dir)

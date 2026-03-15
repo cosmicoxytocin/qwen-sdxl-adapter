@@ -16,5 +16,5 @@ __all__ = [
     "Diff2FlowAlignmentLoss",
     "CachedAdapterDataset",
     "create_dataloader",
-    "WandbLogger"
+    "WandbLogger",
 ]

@@ -18,10 +18,10 @@ class CachedAdapterDataset(Dataset):
         self.files = glob.glob(os.path.join(config.cache_dir, "*.pt"))
         if len(self.files) == 0:
             raise ValueError(f"No cached .pt files found in {config.cache_dir}")
-    
+
     def __len__(self) -> int:
         return len(self.files)
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         file_path = self.files[idx]
         data = torch.load(file_path, weights_only=False)
@@ -43,13 +43,14 @@ class CachedAdapterDataset(Dataset):
         else:
             hidden_states = data["cond_hidden"]
             mask = data["cond_mask"]
-        
+
         return {
             "vae_latents": data["vae_latents"],
             "micro_conds": data["micro_conds"],
             "qwen_hidden_states": hidden_states,
-            "qwen_mask": mask
+            "qwen_mask": mask,
         }
+
 
 def create_dataloader(config: DataConfig) -> DataLoader:
     """Instantiates the DataLoader with optimal multithreading parameters."""

@@ -16,7 +16,7 @@ class AsymmetricRoPECrossAttention(nn.Module):
         self.dim = dim
         self.heads = heads
         self.dim_head = dim // heads
-        self.scale = self.dim_head ** -0.5
+        self.scale = self.dim_head**-0.5
 
         # Projections (bias=False for better performance)
         self.to_q = nn.Linear(dim, dim, bias=False)
@@ -38,7 +38,8 @@ class AsymmetricRoPECrossAttention(nn.Module):
 
         # div_term: [dim_head / 2]
         div_term = torch.exp(
-            torch.arange(0, self.dim_head, 2, dtype=torch.float32, device=x.device) * (-math.log(10000.0) / self.dim_head)
+            torch.arange(0, self.dim_head, 2, dtype=torch.float32, device=x.device)
+            * (-math.log(10000.0) / self.dim_head)
         )
 
         # freqs: [seq_len, dim_head / 2]
@@ -47,20 +48,17 @@ class AsymmetricRoPECrossAttention(nn.Module):
         # emb: [1, 1, seq_len, dim_head]
         emb = torch.cat((freqs, freqs), dim=-1).unsqueeze(0).unsqueeze(0)
 
-        # Cast RoPE embeddings to match input dtype 
+        # Cast RoPE embeddings to match input dtype
         emb = emb.to(dtype=x.dtype)
 
         # Split features for rotation
-        x1, x2 = x[..., :self.dim_head // 2], x[..., self.dim_head // 2:]
+        x1, x2 = x[..., : self.dim_head // 2], x[..., self.dim_head // 2 :]
         x_rotated = torch.cat((-x2, x1), dim=-1)
 
         return (x * emb.cos()) + (x_rotated * emb.sin())
-    
+
     def forward(
-        self,
-        q_x: torch.Tensor,
-        kv_x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
+        self, q_x: torch.Tensor, kv_x: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Forward pass of the cross-attention mechanism."""
         b, n_q, _ = q_x.shape
@@ -72,9 +70,7 @@ class AsymmetricRoPECrossAttention(nn.Module):
 
         # kv: [B, N_kv, D * 2] -> split -> 2 * [B, heads, N_kv, dim_head]
         kv = self.to_kv(kv_x).chunk(2, dim=-1)
-        k, v = [
-            t.view(b, n_kv, self.heads, self.dim_head).transpose(1, 2) for t in kv
-        ]
+        k, v = [t.view(b, n_kv, self.heads, self.dim_head).transpose(1, 2) for t in kv]
 
         # 2. Apply Decoupled RoPE
         q = self._apply_rotary_emb(q, n_q)
@@ -89,7 +85,7 @@ class AsymmetricRoPECrossAttention(nn.Module):
             mask = mask.view(b, 1, 1, n_kv)
             # Fill masked positions with negative infinity
             dots = dots.masked_fill(~mask, torch.finfo(dots.dtype).min)
-        
+
         # attn: [B, heads, N_q, N_kv]
         attn = dots.softmax(dim=-1)
 

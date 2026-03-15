@@ -4,6 +4,7 @@ import argparse
 import os
 from typing import Tuple
 import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
@@ -27,7 +28,7 @@ def generate_image(
     num_inference_steps: int = 20,
     guidance_scale: float = 4.5,
     seed: int = 42,
-    device: str = "cuda"
+    device: str = "cuda",
 ) -> None:
     """Executes the full inference pipeline."""
     torch.manual_seed(seed)
@@ -43,21 +44,20 @@ def generate_image(
     qwen.eval()
 
     # VAE & UNet
-    vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype).to(device)
+    vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype).to(
+        device
+    )
     vae.eval()
 
-    if getattr(config, 'sdxl_single_file_ckpt', None):
+    if getattr(config, "sdxl_single_file_ckpt", None):
         print(f"Loading SDXL UNet from: {config.sdxl_single_file_ckpt}...")
         unet = UNet2DConditionModel.from_single_file(
-            config.sdxl_single_file_ckpt,
-            torch_dtype=dtype
+            config.sdxl_single_file_ckpt, torch_dtype=dtype
         ).to(device)
     else:
         print("Loading SDXL UNet from Hugging Face...")
         unet = UNet2DConditionModel.from_pretrained(
-            config.sdxl_model_id,
-            subfolder="unet",
-            torch_dtype=dtype
+            config.sdxl_model_id, subfolder="unet", torch_dtype=dtype
         ).to(device)
     unet.eval()
 
@@ -71,9 +71,9 @@ def generate_image(
         internal_dim=config.adapter_dim,
         sdxl_context_dim=config.sdxl_context_dim,
         sdxl_pooled_dim=config.sdxl_pooled_dim,
-        num_queries=config.num_latent_queries
+        num_queries=config.num_latent_queries,
     ).to(device, dtype=dtype)
-    
+
     adapter.load_state_dict(load_file(adapter_ckpt_path))
     adapter.eval()
 
@@ -86,9 +86,7 @@ def generate_image(
 
     # Get Qwen Hidden States
     qwen_outputs = qwen.model(
-        input_ids=encoded.input_ids,
-        attention_mask=encoded.attention_mask,
-        return_dict=True
+        input_ids=encoded.input_ids, attention_mask=encoded.attention_mask, return_dict=True
     )
     hidden_states = qwen_outputs.last_hidden_state.to(dtype)
     mask = encoded.attention_mask.bool()
@@ -103,14 +101,14 @@ def generate_image(
     print("4. Executing Diff2Flow Euler Sampling...")
     # Initialize noise (Flow Matching starts at noise t=0)
     x = torch.randn((1, 4, 128, 128), dtype=dtype, device=device)
-    
+
     # Step size
     dt = 1.0 / num_inference_steps
 
     for i in tqdm(range(num_inference_steps), desc="Sampling"):
         # Current time t in [0, 1]
         fm_t = torch.tensor([i * dt], dtype=torch.float32, device=device)
-        
+
         # Expand x and t for CFG batching
         x_in = torch.cat([x, x], dim=0)
         fm_t_in = torch.cat([fm_t, fm_t], dim=0)
@@ -123,7 +121,7 @@ def generate_image(
             dm_x.to(dtype),
             dm_t.to(dtype),
             encoder_hidden_states=adapter_ctx,
-            added_cond_kwargs=added_cond_kwargs
+            added_cond_kwargs=added_cond_kwargs,
         ).sample
 
         # Convert epsilon to velocity (Using public method now)
@@ -153,20 +151,29 @@ def generate_image(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Diff2Flow Inference for Qwen-SDXL Adapter")
-    parser.add_argument("--prompt", type=str, required=True, help="Text prompt (supports tag-soup & natural language)")
-    parser.add_argument("--adapter_ckpt", type=str, required=True, help="Path to trained adapter .safetensors file")
-    parser.add_argument("--output", type=str, default="./output.png", help="Path to save generated image")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        required=True,
+        help="Text prompt (supports tag-soup & natural language)",
+    )
+    parser.add_argument(
+        "--adapter_ckpt", type=str, required=True, help="Path to trained adapter .safetensors file"
+    )
+    parser.add_argument(
+        "--output", type=str, default="./output.png", help="Path to save generated image"
+    )
     parser.add_argument("--steps", type=int, default=20, help="Number of Euler sampling steps")
     parser.add_argument("--cfg", type=float, default=4.5, help="Classifier-Free Guidance scale")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    
+
     args = parser.parse_args()
-    
+
     generate_image(
         prompt=args.prompt,
         adapter_ckpt_path=args.adapter_ckpt,
         output_path=args.output,
         num_inference_steps=args.steps,
         guidance_scale=args.cfg,
-        seed=args.seed
+        seed=args.seed,
     )

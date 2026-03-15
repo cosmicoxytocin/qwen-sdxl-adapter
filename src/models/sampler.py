@@ -16,7 +16,7 @@ class Diff2FlowEulerSampler:
         # 1. Extract and ENFORCE ZERO-TERMINAL SNR on Betas
         betas = noise_scheduler.betas.to(dtype=torch.float32, device=device)
         betas = self._enforce_zero_terminal_snr(betas)
-        
+
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         alphas_cumprod_full = torch.cat([torch.tensor([1.0], device=device), alphas_cumprod])
@@ -46,13 +46,15 @@ class Diff2FlowEulerSampler:
         # Scale so first timestep remains unchanged
         alphas_bar_sqrt *= alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
 
-        alphas_bar = alphas_bar_sqrt ** 2
+        alphas_bar = alphas_bar_sqrt**2
         alphas = alphas_bar[1:] / alphas_bar[:-1]
         alphas = torch.cat([alphas_bar[0:1], alphas])
-        
+
         return 1.0 - alphas
 
-    def convert_fm_to_dm(self, fm_t: torch.Tensor, fm_x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def convert_fm_to_dm(
+        self, fm_t: torch.Tensor, fm_x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Maps Flow Matching (t, x) to Diffusion Model (t, x)."""
         right_index = torch.searchsorted(self.rectified_alphas_flipped, fm_t, right=True)
         left_index = right_index - 1
@@ -70,7 +72,9 @@ class Diff2FlowEulerSampler:
         dm_x = fm_x * scale_t.view(-1, 1, 1, 1)
         return dm_t, dm_x
 
-    def predict_velocity(self, dm_t: torch.Tensor, dm_x: torch.Tensor, eps_pred: torch.Tensor) -> torch.Tensor:
+    def predict_velocity(
+        self, dm_t: torch.Tensor, dm_x: torch.Tensor, eps_pred: torch.Tensor
+    ) -> torch.Tensor:
         """Converts DM epsilon prediction to FM velocity."""
         t_idx = dm_t.long().clamp(0, self.num_timesteps - 1)
         recip_alpha = self.sqrt_recip_alphas_cumprod[t_idx].view(-1, 1, 1, 1)
