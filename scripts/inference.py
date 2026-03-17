@@ -142,6 +142,11 @@ def generate_image(
     # Convert to PIL Image
     image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1)
     image_numpy = image_tensor[0].cpu().permute(1, 2, 0).float().numpy()
+
+    # Catch any NaN/Inf from bloat16 VAE decoding
+    import numpy as np
+    image_numpy = np.nan_to_num(image_numpy, nan=0.0, posinf=1.0, neginf=0.0)
+    
     img = Image.fromarray((image_numpy * 255).astype("uint8"))
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
