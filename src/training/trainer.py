@@ -223,74 +223,79 @@ class AdapterTrainer:
         )
         micro_step = 0
 
-        while self.global_step < self.config.training.max_train_steps:
-            for batch in self.train_dataloader:
-                x1 = batch["vae_latents"].to(self.device, non_blocking=True)
-                qwen_hidden = batch["qwen_hidden_states"].to(self.device, non_blocking=True)
-                qwen_mask = batch["qwen_mask"].to(self.device, non_blocking=True)
-                micro_conds = batch["micro_conds"].to(self.device, non_blocking=True)
+        try:
+            while self.global_step < self.config.training.max_train_steps:
+                for batch in self.train_dataloader:
+                    x1 = batch["vae_latents"].to(self.device, non_blocking=True)
+                    qwen_hidden = batch["qwen_hidden_states"].to(self.device, non_blocking=True)
+                    qwen_mask = batch["qwen_mask"].to(self.device, non_blocking=True)
+                    micro_conds = batch["micro_conds"].to(self.device, non_blocking=True)
 
-                with torch.autocast(
-                    device_type=self.device.type, dtype=self.dtype, enabled=self.use_amp
-                ):
-                    adapter_ctx, adapter_pooled = self.adapter(qwen_hidden, qwen_mask)
-                    loss = self.objective(
-                        unet=self.unet,
-                        adapter_ctx=adapter_ctx,
-                        adapter_pooled=adapter_pooled,
-                        x1=x1,
-                        micro_conds=micro_conds,
-                    )
-                    loss = loss / self.config.training.gradient_accumulation_steps
-
-                self.scaler.scale(loss).backward()
-                micro_step += 1
-
-                if micro_step % self.config.training.gradient_accumulation_steps == 0:
-                    self.scaler.unscale_(self.optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.adapter.parameters(), self.config.training.max_grad_norm
-                    )
-
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.lr_scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
-
-                    self.global_step += 1
-                    progress_bar.update(1)
-
-                    if self.global_step % self.config.logging.log_interval == 0:
-                        logs = {
-                            "train/loss": loss.item()
-                            * self.config.training.gradient_accumulation_steps,
-                            "train/lr": self.lr_scheduler.get_last_lr()[0],
-                        }
-                        if self.config.logging.track_grad_norms:
-                            logs["train/grad_norm"] = grad_norm.item()
-
-                        wandb.log(logs, step=self.global_step)
-                        progress_bar.set_postfix(**logs)
-
-                    # ---------------------------------------------------------
-                    # RUNTIME VALIDATION
-                    # ---------------------------------------------------------
-                    if (
-                        self.config.training.validation_steps > 0
-                        and self.global_step % self.config.training.validation_steps == 0
+                    with torch.autocast(
+                        device_type=self.device.type, dtype=self.dtype, enabled=self.use_amp
                     ):
-                        self.generate_validation_samples()
+                        adapter_ctx, adapter_pooled = self.adapter(qwen_hidden, qwen_mask)
+                        loss = self.objective(
+                            unet=self.unet,
+                            adapter_ctx=adapter_ctx,
+                            adapter_pooled=adapter_pooled,
+                            x1=x1,
+                            micro_conds=micro_conds,
+                        )
+                        loss = loss / self.config.training.gradient_accumulation_steps
 
-                    # ---------------------------------------------------------
-                    # CHECKPOINTING
-                    # ---------------------------------------------------------
-                    if self.global_step % self.config.training.checkpointing_steps == 0:
-                        self.save_checkpoint()
+                    self.scaler.scale(loss).backward()
+                    micro_step += 1
 
-                    if self.global_step >= self.config.training.max_train_steps:
-                        break
-            self.epoch += 1
+                    if micro_step % self.config.training.gradient_accumulation_steps == 0:
+                        self.scaler.unscale_(self.optimizer)
+                        grad_norm = torch.nn.utils.clip_grad_norm_(
+                            self.adapter.parameters(), self.config.training.max_grad_norm
+                        )
+
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.lr_scheduler.step()
+                        self.optimizer.zero_grad(set_to_none=True)
+
+                        self.global_step += 1
+                        progress_bar.update(1)
+
+                        if self.global_step % self.config.logging.log_interval == 0:
+                            logs = {
+                                "train/loss": loss.item()
+                                * self.config.training.gradient_accumulation_steps,
+                                "train/lr": self.lr_scheduler.get_last_lr()[0],
+                            }
+                            if self.config.logging.track_grad_norms:
+                                logs["train/grad_norm"] = grad_norm.item()
+
+                            wandb.log(logs, step=self.global_step)
+                            progress_bar.set_postfix(**logs)
+
+                        # RUNTIME VALIDATION
+                        if (
+                            self.config.training.validation_steps > 0
+                            and self.global_step % self.config.training.validation_steps == 0
+                        ):
+                            self.generate_validation_samples()
+
+                        # CHECKPOINTING
+                        if self.global_step % self.config.training.checkpointing_steps == 0:
+                            self.save_checkpoint()
+
+                        if self.global_step >= self.config.training.max_train_steps:
+                            break
+                self.epoch += 1
+
+        except KeyboardInterrupt:
+            # FIX: Safely catch manual stops and dump the checkpoint
+            print("\n[Interrupt] Caught KeyboardInterrupt! Saving current state safely...")
+            self.save_checkpoint()
+            progress_bar.close()
+            print("Safe exit complete. You can resume from this checkpoint later.")
+            return
 
         self.save_checkpoint()
         progress_bar.close()
-        print("Training complete.")
+        print("Training complete. Final checkpoint saved.")
