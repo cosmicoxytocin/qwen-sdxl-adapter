@@ -23,8 +23,10 @@ class Diff2FlowEulerSampler:
 
         self.sqrt_alphas_cumprod_full = torch.sqrt(alphas_cumprod_full)
         self.sqrt_one_minus_alphas_cumprod_full = torch.sqrt(1.0 - alphas_cumprod_full)
-        self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod - 1.0)
+
+        alphas_cumprod_clamped = alphas_cumprod.clamp(min=1e-7)
+        self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod_clamped)
+        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod_clamped - 1.0)
 
         self.rectified_alphas = self.sqrt_alphas_cumprod_full / (
             self.sqrt_alphas_cumprod_full + self.sqrt_one_minus_alphas_cumprod_full
@@ -81,4 +83,8 @@ class Diff2FlowEulerSampler:
         recipm1_alpha = self.sqrt_recipm1_alphas_cumprod[t_idx].view(-1, 1, 1, 1)
 
         x1_pred = recip_alpha * dm_x - recipm1_alpha * eps_pred
-        return x1_pred - eps_pred
+        v_pred = x1_pred - eps_pred
+
+        # Bounding safeguard: replaces any NaN or Inf with zero velocity
+        v_pred = torch.nan_to_num(v_pred, nan=0.0, posinf=0.0, neginf=0.0)
+        return v_pred

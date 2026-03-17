@@ -27,20 +27,17 @@ class Diff2FlowAlignmentLoss(nn.Module):
 
         self.num_timesteps = len(betas)
 
-        # Precompute square roots for velocity calculation
         self.sqrt_alphas_cumprod_full = torch.sqrt(alphas_cumprod_full)
         self.sqrt_one_minus_alphas_cumprod_full = torch.sqrt(1.0 - alphas_cumprod_full)
 
-        # For eps to x0 prediction (Diffusion space)
-        self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod - 1.0)
+        # Clamp to prevent division by Zero in later calculations
+        alphas_cumprod_clamped = alphas_cumprod.clamp(min=1e-7)
+        self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod_clamped)
+        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod_clamped - 1.0)
 
-        # Precompute Rectified alphas for time mapping
         self.rectified_alphas = self.sqrt_alphas_cumprod_full / (
             self.sqrt_alphas_cumprod_full + self.sqrt_one_minus_alphas_cumprod_full
         )
-
-        # Flipped for torch searchsorted (requires monotonically increasing)
         self.rectified_alphas_flipped = torch.flip(self.rectified_alphas, dims=[0])
 
     def _enforce_zero_terminal_snr(self, betas: torch.Tensor) -> torch.Tensor:
@@ -145,6 +142,9 @@ class Diff2FlowAlignmentLoss(nn.Module):
         x1_pred = self._predict_x1_from_eps(dm_xt, dm_t, eps_pred).to(dtype)
         v_pred = x1_pred - eps_pred
 
-        # 6. Loss calculation
+        # FIX: Bounding safeguard to prevent NaN/Inf values in velocity prediction
+        v_pred = torch.nan_to_num(v_pred, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 6. Loss: MSE between predicted velocity and target velocity
         loss = F.mse_loss(v_pred.float(), v_target.float(), reduction="mean")
         return loss
