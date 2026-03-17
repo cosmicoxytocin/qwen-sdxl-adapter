@@ -22,6 +22,7 @@ from transformers import (
 from src.models.bridge import CausalToSpatialPerceiverBridge
 from src.training.distill_loss import DistillationLoss
 from src.config import ExperimentConfig
+from safetensors.torch import save_file
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 1: Adapter Distillation")
@@ -154,7 +155,6 @@ def main():
 
         # Checkpointing
         if global_step % 5000 == 0:
-            from safetensors.torch import save_file
             ckpt_path = os.path.join(args.output_dir, f"adapter_distilled_step_{global_step}.safetensors")
             save_file(adapter.state_dict(), ckpt_path)
         
