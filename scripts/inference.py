@@ -1,184 +1,225 @@
 """Inference script for the Qwen-SDXL Adapter."""
 
+
 import argparse
 import os
-from typing import Tuple
+import time
+from datetime import datetime
+from typing import Optional, Tuple
 import sys
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-import torch.nn as nn
-from tqdm import tqdm
-from PIL import Image
-from diffusers import UNet2DConditionModel, AutoencoderKL, DDPMScheduler
+import torchvision.transforms.functional as TF
+from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from PIL import Image
 from safetensors.torch import load_file
+from tqdm.auto import tqdm
 
 from src.models.bridge import CausalToSpatialPerceiverBridge
-from src.config import ModelConfig
 from src.models.sampler import Diff2FlowEulerSampler
 
+def apply_flow_shift(t: float, shift: float = 3.0) -> float:
+    """Applies time-shift to the Diff2Flow noise schedule."""
+    # Invert to standard FM
+    u = 1.0 - t
+    # Apply shift curve
+    u_shifted = (shift * u) / (1.0 + (shift - 1.0) * u)
+    # Invert back to Diff2Flow
+    return 1.0 - u_shifted
 
-@torch.no_grad()
-def generate_image(
-    prompt: str,
-    adapter_ckpt_path: str,
-    output_path: str,
-    num_inference_steps: int = 20,
-    guidance_scale: float = 4.5,
-    seed: int = 42,
-    device: str = "cuda",
-) -> None:
-    """Executes the full inference pipeline."""
-    torch.manual_seed(seed)
-    dtype = torch.bfloat16
-    config = ModelConfig()
 
-    print("1. Loading frozen models (Qwen, UNet, VAE)...")
-    # LLM
-    tokenizer = AutoTokenizer.from_pretrained(config.qwen_model_id, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    qwen = AutoModelForCausalLM.from_pretrained(config.qwen_model_id, torch_dtype=dtype).to(device)
-    qwen.eval()
-
-    # VAE & UNet
-    vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype).to(
-        device
-    )
-    vae.eval()
-
-    if getattr(config, "sdxl_single_file_ckpt", None):
-        print(f"Loading SDXL UNet from: {config.sdxl_single_file_ckpt}...")
-        unet = UNet2DConditionModel.from_single_file(
-            config.sdxl_single_file_ckpt, torch_dtype=dtype
-        ).to(device)
-    else:
-        print("Loading SDXL UNet from Hugging Face...")
-        unet = UNet2DConditionModel.from_pretrained(
-            config.sdxl_model_id, subfolder="unet", torch_dtype=dtype
-        ).to(device)
-    unet.eval()
-
-    noise_scheduler = DDPMScheduler.from_pretrained(config.sdxl_model_id, subfolder="scheduler")
-    sampler = Diff2FlowEulerSampler(noise_scheduler, torch.device(device))
-
-    print(f"2. Loading trained CSPB Adapter from {adapter_ckpt_path}...")
-    adapter = CausalToSpatialPerceiverBridge(
-        depth=config.adapter_depth,
-        qwen_dim=config.adapter_dim,
-        internal_dim=config.adapter_dim,
-        sdxl_context_dim=config.sdxl_context_dim,
-        sdxl_pooled_dim=config.sdxl_pooled_dim,
-        num_queries=config.num_latent_queries,
-    ).to(device, dtype=dtype)
-
-    adapter.load_state_dict(load_file(adapter_ckpt_path))
-    adapter.eval()
-
-    print(f"3. Processing prompt: '{prompt}'")
-    # Tokenize conditional and unconditional
-    prompts = ["", prompt]
-    encoded = tokenizer(
-        prompts, padding="max_length", truncation=True, max_length=256, return_tensors="pt"
-    ).to(device)
-
-    # Get Qwen Hidden States
-    qwen_outputs = qwen.model(
-        input_ids=encoded.input_ids, attention_mask=encoded.attention_mask, return_dict=True
-    )
-    hidden_states = qwen_outputs.last_hidden_state.to(dtype)
-    mask = encoded.attention_mask.bool()
-
-    # Pass through Adapter
-    adapter_ctx, adapter_pooled = adapter(hidden_states, mask)
-
-    # SDXL Micro-Conditioning: [original_h, original_w, crop_y, crop_x, target_h, target_w]
-    micro_conds = torch.tensor([[1024, 1024, 0, 0, 1024, 1024]] * 2, dtype=dtype, device=device)
-    added_cond_kwargs = {"text_embeds": adapter_pooled, "time_ids": micro_conds}
-
-    print("4. Executing Diff2Flow Euler Sampling...")
-    # Initialize noise (Flow Matching starts at noise t=0)
-    x = torch.randn((1, 4, 128, 128), dtype=dtype, device=device)
-
-    # Step size
-    dt = 1.0 / num_inference_steps
-
-    for i in tqdm(range(num_inference_steps), desc="Sampling"):
-        # Current time t in [0, 1]
-        fm_t = torch.tensor([i * dt], dtype=torch.float32, device=device)
-
-        # Expand x and t for CFG batching
-        x_in = torch.cat([x, x], dim=0)
-        fm_t_in = torch.cat([fm_t, fm_t], dim=0)
-
-        # Convert to DM variables for UNet (Using public method now)
-        dm_t, dm_x = sampler.convert_fm_to_dm(fm_t_in, x_in)
-
-        # Predict epsilon
-        eps_pred = unet(
-            dm_x.to(dtype),
-            dm_t.to(dtype),
-            encoder_hidden_states=adapter_ctx,
-            added_cond_kwargs=added_cond_kwargs,
-        ).sample
-
-        # Convert epsilon to velocity (Using public method now)
-        v_pred = sampler.predict_velocity(dm_t, dm_x, eps_pred)
-
-        # Classifier-Free Guidance (CFG)
-        v_uncond, v_cond = v_pred.chunk(2)
-        v_cfg = v_uncond + guidance_scale * (v_cond - v_uncond)
-
-        # Euler Step (straight line)
-        x = x + v_cfg.to(dtype) * dt
-
-    print("5. Decoding Latents via VAE...")
-    # Scale by VAE scaling factor
-    x = x / vae.config.scaling_factor
-    image_tensor = vae.decode(x).sample
-
-    # Convert to PIL Image
-    image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1)
-    image_numpy = image_tensor[0].cpu().permute(1, 2, 0).float().numpy()
-
-    # Catch any NaN/Inf from bloat16 VAE decoding
-    import numpy as np
-    image_numpy = np.nan_to_num(image_numpy, nan=0.0, posinf=1.0, neginf=0.0)
+class QwenSDXLPipeline:
     
-    img = Image.fromarray((image_numpy * 255).astype("uint8"))
+    def __init__(
+        self,
+        qwen_id: str = "Qwen/Qwen3.5-0.8B-Base",
+        unet_path: str = "stabilityai/stable-diffusion-xl-base-1.0",
+        vae_id: str = "madebyollin/sdxl-vae-fp16-fix",
+        adapter_ckpt: str = "",
+        is_single_file_unet: bool = False,
+        device: str = "cuda"
+    ):
+        self.device = device
+        self.dtype = torch.bfloat16
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    img.save(output_path)
-    print(f"Success! Image saved to {output_path}")
+        print("1. Loading VAE...")
+        self.vae = AutoencoderKL.from_pretrained(vae_id, torch_dtype=torch.float16).to(self.device).eval()
 
+        print("2. Loading Qwen LLM...")
+        self.tokenizer = AutoTokenizer.from_pretrained(qwen_id, trust_remote_code=True)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.qwen = AutoModelForCausalLM.from_pretrained(qwen_id, torch_dtype=self.dtype).to(self.device).eval()
 
+        print("3. Loading SDXL UNet...")
+        if is_single_file_unet or unet_path.endswith(".safetensors"):
+            self.unet = UNet2DConditionModel.from_pretrained(unet_path, torch_dtype=self.dtype).to(self.device).eval()
+        else:
+            self.unet = UNet2DConditionModel.from_pretrained(unet_path, subfolder="unet", torch_dtype=self.dtype).to(self.device).eval()
+        
+        print("4. Initializing CSPB Adapter...")
+        self.adapter = CausalToSpatialPerceiverBridge(
+            depth=6,
+            qwen_dim=1024,
+            internal_dim=1024,
+            sdxl_context_dim=2048,
+            sdxl_pooled_dim=1280,
+            num_queries=78
+        ).to(self.device, dtype=self.dtype).eval()
+
+        if adapter_ckpt:
+            print(f"  -> Loading adapter weights from {adapter_ckpt}...")
+            self.adapter.load_state_dict(load_file(adapter_ckpt))
+        
+        # Setup standard SDXL sampler to get beta schedules
+        scheduler = DDPMScheduler.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", subfolder="scheduler")
+        self.sampler = Diff2FlowEulerSampler(scheduler, self.device)
+
+        print("Pipeline initialization complete.")
+    
+    @torch.no_grad()
+    def generate(
+        self,
+        prompt: str,
+        negative_prompt: str = "",
+        width: int = 1024,
+        height: int = 1024,
+        num_inference_steps: int = 25,
+        cfg_scale: float = 4.5,
+        shift: float = 3.0,
+        seed: Optional[int] = None,
+        output_dir: str = "./outputs"
+    ) -> Image.Image:
+        """Generates an image from the given prompt using the Qwen-SDXL Adapter pipeline."""
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Round dimensions to nearest 64
+        width = (width // 64) * 64
+        height = (height // 64) * 64
+
+        if seed is not None:
+            torch.manual_seed(seed)
+        
+        # 1. Encode Text
+        prompts = [negative_prompt, prompt]
+        encoded = self.tokenizer(
+            prompts,
+            padding="max_length",
+            truncation=True,
+            max_length=256,
+            return_tensors="pt"
+        ).to(self.device)
+
+        qwen_out = self.qwen.model(
+            input_ids=encoded.input_ids,
+            attention_mask=encoded.attention_mask,
+            return_dict=True
+        )
+        hidden_states = qwen_out.last_hidden_state.to(self.dtype)
+        mask = encoded.attention_mask.bool()
+
+        # 2. Adapter embeddings
+        with torch.autocast(device_type=self.device.type, dtype=self.dtype):
+            adapter_ctx, adapter_pooled = self.adapter(hidden_states, mask)
+        
+        # 3. Setup micro-conditioning
+        # batched for [uncond, cond]
+        micro_conds = torch.tensor([
+            [height, width, 0, 0, height, width]
+        ] * 2, dtype=self.dtype, device=self.device)
+        added_cond_kwargs = {"text_embeds": adapter_pooled, "time_ids": micro_conds}
+
+        # 4. Initialize Noise
+        shape = (1, 4, height // 8, width // 8)
+        x = torch.randn(shape, dtype=self.dtype, device=self.device)
+        dt = 1.0 / num_inference_steps
+        
+        # 5. Euler ODE Loop with Time-Shifting
+        progress_bar = tqdm(total=num_inference_steps, desc="Sampling")
+        
+        for i in range(num_inference_steps):
+            linear_t = i * dt
+            
+            # Apply Flow Matching Shift
+            fm_t = apply_flow_shift(linear_t, shift=shift)
+            fm_t_tensor = torch.tensor([fm_t, fm_t], dtype=torch.float32, device=self.device)
+            
+            # Duplicate latent for CFG
+            x_in = torch.cat([x, x], dim=0)
+            
+            # Convert Flow Matching to Diffusion scale for UNet
+            dm_t, dm_x = self.sampler.convert_fm_to_dm(fm_t_tensor, x_in)
+            
+            with torch.autocast(device_type=self.device.type, dtype=self.dtype):
+                eps_pred = self.unet(
+                    dm_x.to(self.dtype), 
+                    dm_t.to(self.dtype), 
+                    encoder_hidden_states=adapter_ctx, 
+                    added_cond_kwargs=added_cond_kwargs
+                ).sample
+                
+            # Convert back to velocity
+            v_pred = self.sampler.predict_velocity(dm_t, dm_x, eps_pred)
+            
+            # Apply CFG
+            v_uncond, v_cond = v_pred.chunk(2)
+            v_cfg = v_uncond + cfg_scale * (v_cond - v_uncond)
+            
+            # Euler Step
+            x = x + v_cfg.to(self.dtype) * dt
+            progress_bar.update(1)
+            
+        progress_bar.close()
+            
+        # 6. Decode Image
+        x = x / self.vae.config.scaling_factor
+        with torch.autocast(device_type=self.device.type, dtype=torch.float16):
+            image_tensor = self.vae.decode(x.to(torch.float16)).sample
+            
+        img_normalized = (image_tensor[0] / 2 + 0.5).clamp(0, 1)
+        img_pil = TF.to_pil_image(img_normalized)
+        
+        # 7. Auto-Index Saving
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"output_{timestamp}.png"
+        filepath = os.path.join(output_dir, filename)
+        img_pil.save(filepath)
+        
+        print(f"🖼️ Saved to: {filepath}")
+        return img_pil
+
+# --- CLI Execution ---
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Diff2Flow Inference for Qwen-SDXL Adapter")
-    parser.add_argument(
-        "--prompt",
-        type=str,
-        required=True,
-        help="Text prompt (supports tag-soup & natural language)",
-    )
-    parser.add_argument(
-        "--adapter_ckpt", type=str, required=True, help="Path to trained adapter .safetensors file"
-    )
-    parser.add_argument(
-        "--output", type=str, default="./output.png", help="Path to save generated image"
-    )
-    parser.add_argument("--steps", type=int, default=20, help="Number of Euler sampling steps")
-    parser.add_argument("--cfg", type=float, default=4.5, help="Classifier-Free Guidance scale")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-
+    import torchvision.transforms.functional as TF
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt", type=str, required=True)
+    parser.add_argument("--negative_prompt", type=str, default="")
+    parser.add_argument("--adapter_ckpt", type=str, required=True)
+    parser.add_argument("--unet_path", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
+    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--steps", type=int, default=25)
+    parser.add_argument("--cfg", type=float, default=4.5)
+    parser.add_argument("--shift", type=float, default=3.0)
+    parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
-
-    generate_image(
+    
+    pipe = QwenSDXLPipeline(
+        unet_path=args.unet_path,
+        adapter_ckpt=args.adapter_ckpt,
+        is_single_file_unet=args.unet_path.endswith(".safetensors")
+    )
+    
+    pipe.generate(
         prompt=args.prompt,
-        adapter_ckpt_path=args.adapter_ckpt,
-        output_path=args.output,
+        negative_prompt=args.negative_prompt,
+        width=args.width,
+        height=args.height,
         num_inference_steps=args.steps,
-        guidance_scale=args.cfg,
-        seed=args.seed,
+        cfg_scale=args.cfg,
+        shift=args.shift,
+        seed=args.seed
     )
