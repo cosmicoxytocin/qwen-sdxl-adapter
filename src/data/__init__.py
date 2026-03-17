@@ -1,3 +1,3 @@
-from .dataset import CachedAdapterDataset, create_dataloader
+from .dataset import CachedAdapterDataset, AspectRatioBatchSampler, create_dataloader
 
-__all__ = ["CachedAdapterDataset", "create_dataloader"]
+__all__ = ["CachedAdapterDataset", "AspectRatioBatchSampler", "create_dataloader"]
