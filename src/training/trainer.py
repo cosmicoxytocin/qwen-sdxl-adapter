@@ -1,243 +1,65 @@
-"""Training loop for Qwen-SDXL Adapter."""
+"""Main training loop for Phase 2 Diff2Flow."""
 
 import os
-from typing import Dict, Any, Optional
-
 import torch
-from torch import nn
-from torch.utils.data import DataLoader
-from transformers import get_cosine_schedule_with_warmup
 import wandb
-from tqdm import tqdm
+from tqdm.auto import tqdm
+from safetensors.torch import save_file
+import torchvision.transforms.functional as TF
+from PIL import Image
 
-from ..models.bridge import CausalToSpatialPerceiverBridge
-from ..models.sampler import Diff2FlowEulerSampler
-from .loss import Diff2FlowAlignmentLoss
-from ..config import ExperimentConfig
+from src.models.sampler import Diff2FlowEulerSampler
 
-
-class AdapterTrainer:
-    """Manages the lifecycle of the adapter training process."""
-
-    def __init__(
-        self,
-        config: ExperimentConfig,
-        adapter: CausalToSpatialPerceiverBridge,
-        unet: nn.Module,
-        objective: Diff2FlowAlignmentLoss,
-        train_dataloader: DataLoader,
-        device: torch.device,
-        # Runtime validation
-        qwen: Optional[nn.Module] = None,
-        tokenizer: Optional[Any] = None,
-        vae: Optional[nn.Module] = None,
-        sampler: Optional[Diff2FlowEulerSampler] = None,
-    ) -> None:
+class Trainer:
+    def __init__(self, unet, adapter, qwen, vae, tokenizer, dataloader, objective, config, device, dtype):
+        self.unet = unet
+        self.adapter = adapter
+        self.qwen = qwen  # Lives on CPU
+        self.vae = vae    # Lives on CPU
+        self.tokenizer = tokenizer
+        self.train_dataloader = dataloader
+        self.objective = objective
         self.config = config
         self.device = device
-        self.train_dataloader = train_dataloader
+        self.dtype = dtype
 
-        # Modules
-        self.adapter = adapter.to(device)
-        self.unet = unet.to(device)
-        self.objective = objective.to(device)
-
-        # Runtime validation components (optional)
-        self.qwen = qwen
-        self.tokenizer = tokenizer
-        self.vae = vae
-        self.sampler = sampler
-
-        # Optimizer Setup
         self.optimizer = torch.optim.AdamW(
             self.adapter.parameters(),
             lr=config.training.learning_rate,
-            betas=config.training.betas,
             weight_decay=config.training.weight_decay,
         )
 
-        self.lr_scheduler = get_cosine_schedule_with_warmup(
-            optimizer=self.optimizer,
-            num_warmup_steps=config.training.lr_warmup_steps,
-            num_training_steps=config.training.max_train_steps,
+        total_steps = config.training.max_train_steps
+        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=total_steps, eta_min=1e-6
         )
 
-        # Mixed Precision Setup
-        self.use_amp = config.training.mixed_precision != "no"
-        self.dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.dtype == torch.float16))
-
-        # State
+        self.scaler = torch.amp.GradScaler('cuda', enabled=config.training.mixed_precision == "fp16")
         self.global_step = 0
         self.epoch = 0
 
-        if getattr(self.config.training, "resume_from_checkpoint", None):
-            self.load_checkpoint(self.config.training.resume_from_checkpoint)
+        if config.logging.use_wandb:
+            wandb.init(project=config.logging.wandb_project, config=config.dict())
 
-    def save_checkpoint(self) -> None:
-        """Saves adapter weights and full optimizer state (Kohya style)."""
-        from safetensors.torch import save_file
-
-        os.makedirs(self.config.training.output_dir, exist_ok=True)
-        base_path = os.path.join(self.config.training.output_dir, f"step_{self.global_step}")
-
-        # 1. Save Weights
-        save_file(self.adapter.state_dict(), f"{base_path}_adapter.safetensors")
-
-        # 2. Save Optimizer State
-        if getattr(self.config.training, "save_optimizer_state", True):
-            state = {
-                "optimizer": self.optimizer.state_dict(),
-                "lr_scheduler": self.lr_scheduler.state_dict(),
-                "scaler": self.scaler.state_dict(),
-                "global_step": self.global_step,
-                "epoch": self.epoch,
-            }
-            torch.save(state, f"{base_path}_state.pt")
-
-        print(f"\n[Checkpoint Saved] -> {base_path}")
-
-    def load_checkpoint(self, checkpoint_prefix: str) -> None:
-        """Restores weights and optimizer state to resume training perfectly."""
-        from safetensors.torch import load_file
-
-        print(f"\n[Resuming] Loading checkpoint from: {checkpoint_prefix}")
-
-        # 1. Load Weights
-        weight_path = f"{checkpoint_prefix}_adapter.safetensors"
-        if os.path.exists(weight_path):
-            self.adapter.load_state_dict(load_file(weight_path))
-        else:
-            raise FileNotFoundError(f"Weight file missing: {weight_path}")
-
-        # 2. Load State
-        state_path = f"{checkpoint_prefix}_state.pt"
-        if os.path.exists(state_path):
-            state = torch.load(state_path, map_location=self.device)
-            self.optimizer.load_state_dict(state["optimizer"])
-            self.lr_scheduler.load_state_dict(state["lr_scheduler"])
-            self.scaler.load_state_dict(state["scaler"])
-            self.global_step = state["global_step"]
-            self.epoch = state["epoch"]
-            print(f"[Resumed] Starting from Step: {self.global_step}, Epoch: {self.epoch}")
-        else:
-            print("[Warning] No optimizer state found. Resuming weights only.")
-
-    @torch.no_grad()
-    def generate_validation_samples(self) -> None:
-        """Kohya-ss/sd-scripts runtime image sampling. Evaluates current adapter weights."""
-        if not all([self.qwen, self.tokenizer, self.vae, self.sampler]):
-            print("[Warning] Missing validation modules. Skipping generation.")
-            return
-
-        print(f"\n--- Generating Validation Samples (Step {self.global_step}) ---")
-        self.adapter.eval()
-        torch.cuda.empty_cache()  # Free memory before inference
-
-        validation_images = {}
-        for idx, prompt in enumerate(self.config.logging.validation_prompts):
-            if not prompt.strip():
-                continue
-
-            prompts = ["", prompt]  # Unconditional, Conditional
-            encoded = self.tokenizer(
-                prompts, padding="max_length", truncation=True, max_length=256, return_tensors="pt"
-            ).to(self.device)
-
-            input_ids = encoded.input_ids[:2, :256]  # Ensure max_length
-            attention_mask = encoded.attention_mask[:2, :256]
-
-            qwen_outputs = self.qwen.model(
-                input_ids=input_ids, attention_mask=attention_mask, return_dict=True
-            )
-            hidden_states = qwen_outputs.last_hidden_state.to(self.dtype)
-            mask = attention_mask.bool()
-
-            with torch.autocast(
-                device_type=self.device.type, dtype=self.dtype, enabled=self.use_amp
-            ):
-                adapter_ctx, adapter_pooled = self.adapter(hidden_states, mask)
-
-            micro_conds = torch.tensor(
-                [[1024, 1024, 0, 0, 1024, 1024]] * 2, dtype=self.dtype, device=self.device
-            )
-            added_cond_kwargs = {"text_embeds": adapter_pooled, "time_ids": micro_conds}
-
-            # Euler ODE Sampling (20 Steps)
-            x = torch.randn((1, 4, 128, 128), dtype=self.dtype, device=self.device)
-            dt = 1.0 / 20
-
-            for i in range(20):
-                fm_t = torch.tensor([i * dt], dtype=torch.float32, device=self.device)
-                x_in = torch.cat([x, x], dim=0)
-                fm_t_in = torch.cat([fm_t, fm_t], dim=0)
-
-                dm_t, dm_x = self.sampler.convert_fm_to_dm(fm_t_in, x_in)
-
-                with torch.autocast(
-                    device_type=self.device.type, dtype=self.dtype, enabled=self.use_amp
-                ):
-                    eps_pred = self.unet(
-                        dm_x.to(self.dtype),
-                        dm_t.to(self.dtype),
-                        encoder_hidden_states=adapter_ctx,
-                        added_cond_kwargs=added_cond_kwargs,
-                    ).sample
-
-                v_pred = self.sampler.predict_velocity(dm_t, dm_x, eps_pred)
-                v_uncond, v_cond = v_pred.chunk(2)
-                v_cfg = v_uncond + 4.5 * (v_cond - v_uncond)  # CFG = 4.5
-                x = x + v_cfg.to(self.dtype) * dt
-
-            # VAE Decode
-            x = x / self.vae.config.scaling_factor
-            with torch.autocast(
-                device_type=self.device.type, dtype=self.dtype, enabled=self.use_amp
-            ):
-                image_tensor = self.vae.decode(x).sample
-
-            # Normalize and format for WandB
-            img_normalized = (image_tensor[0] / 2 + 0.5).clamp(0, 1)
-            validation_images[f"Validation/Sample_{idx}"] = wandb.Image(
-                img_normalized.float().cpu(), caption=prompt
-            )
-
-        if validation_images:
-            wandb.log(validation_images, step=self.global_step)
-
-        self.adapter.train()
-        torch.cuda.empty_cache()
-
-    def train(self) -> None:
-        """Main training loop."""
-        print(
-            f"Starting training on {self.device} for {self.config.training.max_train_steps} steps..."
-        )
-
-        if len(self.train_dataloader) == 0:
-            raise ValueError("DataLoader is empty!")
-
-        self.adapter.train()
-        self.unet.eval()  # UNet is frozen
-
-        # Resume progress bar naturally if resuming from checkpoint
-        progress_bar = tqdm(
-            total=self.config.training.max_train_steps, desc="Training", initial=self.global_step
-        )
+    def train(self):
+        progress_bar = tqdm(total=self.config.training.max_train_steps, desc="Training")
         micro_step = 0
 
+        # SAFETY NET: Catch Colab cell stops to save the checkpoint
         try:
             while self.global_step < self.config.training.max_train_steps:
                 for batch in self.train_dataloader:
+                    
+                    # 1. Load pre-cached ARB Data
                     x1 = batch["vae_latents"].to(self.device, non_blocking=True)
                     qwen_hidden = batch["qwen_hidden_states"].to(self.device, non_blocking=True)
                     qwen_mask = batch["qwen_mask"].to(self.device, non_blocking=True)
                     micro_conds = batch["micro_conds"].to(self.device, non_blocking=True)
 
-                    with torch.autocast(
-                        device_type=self.device.type, dtype=self.dtype, enabled=self.use_amp
-                    ):
+                    # 2. Forward Pass
+                    with torch.autocast(device_type=self.device.type, dtype=self.dtype):
                         adapter_ctx, adapter_pooled = self.adapter(qwen_hidden, qwen_mask)
+                        
                         loss = self.objective(
                             unet=self.unet,
                             adapter_ctx=adapter_ctx,
@@ -247,14 +69,14 @@ class AdapterTrainer:
                         )
                         loss = loss / self.config.training.gradient_accumulation_steps
 
+                    # 3. Backward Pass
                     self.scaler.scale(loss).backward()
                     micro_step += 1
 
+                    # 4. Optimizer Step
                     if micro_step % self.config.training.gradient_accumulation_steps == 0:
                         self.scaler.unscale_(self.optimizer)
-                        grad_norm = torch.nn.utils.clip_grad_norm_(
-                            self.adapter.parameters(), self.config.training.max_grad_norm
-                        )
+                        torch.nn.utils.clip_grad_norm_(self.adapter.parameters(), self.config.training.max_grad_norm)
 
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
@@ -265,22 +87,11 @@ class AdapterTrainer:
                         progress_bar.update(1)
 
                         if self.global_step % self.config.logging.log_interval == 0:
-                            logs = {
-                                "train/loss": loss.item()
-                                * self.config.training.gradient_accumulation_steps,
-                                "train/lr": self.lr_scheduler.get_last_lr()[0],
-                            }
-                            if self.config.logging.track_grad_norms:
-                                logs["train/grad_norm"] = grad_norm.item()
+                            wandb.log({"train/loss": loss.item() * self.config.training.gradient_accumulation_steps, "train/lr": self.lr_scheduler.get_last_lr()[0]}, step=self.global_step)
+                            progress_bar.set_postfix({"loss": loss.item()})
 
-                            wandb.log(logs, step=self.global_step)
-                            progress_bar.set_postfix(**logs)
-
-                        # RUNTIME VALIDATION
-                        if (
-                            self.config.training.validation_steps > 0
-                            and self.global_step % self.config.training.validation_steps == 0
-                        ):
+                        # VALIDATION
+                        if self.config.training.validation_steps > 0 and self.global_step % self.config.training.validation_steps == 0:
                             self.generate_validation_samples()
 
                         # CHECKPOINTING
@@ -292,13 +103,83 @@ class AdapterTrainer:
                 self.epoch += 1
 
         except KeyboardInterrupt:
-            # FIX: Safely catch manual stops and dump the checkpoint
             print("\n[Interrupt] Caught KeyboardInterrupt! Saving current state safely...")
             self.save_checkpoint()
             progress_bar.close()
-            print("Safe exit complete. You can resume from this checkpoint later.")
+            print("Safe exit complete.")
             return
 
         self.save_checkpoint()
         progress_bar.close()
-        print("Training complete. Final checkpoint saved.")
+        print("Training complete.")
+
+    @torch.no_grad()
+    def generate_validation_samples(self):
+        print("\nRunning Validation...")
+        self.adapter.eval()
+        
+        # 1. JUGGLE TO GPU
+        self.qwen.to(self.device)
+        self.vae.to(self.device)
+
+        from diffusers import DDPMScheduler
+        scheduler = DDPMScheduler.from_pretrained(self.config.model.sdxl_model_id, subfolder="scheduler")
+        sampler = Diff2FlowEulerSampler(scheduler, self.device)
+
+        val_images = []
+        for prompt in self.config.training.validation_prompts:
+            
+            # STRICT Truncation to prevent batch overflow
+            encoded = self.tokenizer(["", prompt], padding="max_length", truncation=True, max_length=256, return_tensors="pt").to(self.device)
+            input_ids = encoded.input_ids[:2, :256]
+            attention_mask = encoded.attention_mask[:2, :256]
+
+            qwen_out = self.qwen.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            hidden_states = qwen_out.last_hidden_state.to(self.dtype)
+            mask = attention_mask.bool()
+
+            with torch.autocast(device_type=self.device.type, dtype=self.dtype):
+                adapter_ctx, adapter_pooled = self.adapter(hidden_states, mask)
+
+            micro_conds = torch.tensor([[1024, 1024, 0, 0, 1024, 1024]] * 2, dtype=self.dtype, device=self.device)
+            added_cond_kwargs = {"text_embeds": adapter_pooled, "time_ids": micro_conds}
+
+            x = torch.randn((1, 4, 128, 128), dtype=self.dtype, device=self.device)
+            dt = 1.0 / 25
+            
+            for i in range(25):
+                t = i * dt
+                fm_t = torch.tensor([t, t], dtype=torch.float32, device=self.device)
+                x_in = torch.cat([x, x], dim=0)
+                dm_t, dm_x = sampler.convert_fm_to_dm(fm_t, x_in)
+                
+                with torch.autocast(device_type=self.device.type, dtype=self.dtype):
+                    eps_pred = self.unet(dm_x.to(self.dtype), dm_t.to(self.dtype), encoder_hidden_states=adapter_ctx, added_cond_kwargs=added_cond_kwargs).sample
+                    
+                v_pred = sampler.predict_velocity(dm_t, dm_x, eps_pred)
+                v_uncond, v_cond = v_pred.chunk(2)
+                v_cfg = v_uncond + 4.5 * (v_cond - v_uncond)
+                x = x + v_cfg.to(self.dtype) * dt
+
+            x = x / self.vae.config.scaling_factor
+            with torch.autocast(device_type=self.device.type, dtype=torch.float16):
+                img_tensor = self.vae.decode(x.to(torch.float16)).sample
+                
+            img_normalized = (img_tensor[0] / 2 + 0.5).clamp(0, 1)
+            img_pil = TF.to_pil_image(img_normalized)
+            val_images.append(wandb.Image(img_pil, caption=prompt))
+
+        if self.config.logging.use_wandb:
+            wandb.log({"validation/images": val_images}, step=self.global_step)
+
+        # 2. JUGGLE TO CPU & CLEAR VRAM
+        self.qwen.to("cpu")
+        self.vae.to("cpu")
+        torch.cuda.empty_cache()
+        self.adapter.train()
+
+    def save_checkpoint(self):
+        os.makedirs(self.config.training.output_dir, exist_ok=True)
+        ckpt_path = os.path.join(self.config.training.output_dir, f"adapter_step_{self.global_step}.safetensors")
+        save_file(self.adapter.state_dict(), ckpt_path)
+        print(f"\nSaved checkpoint: {ckpt_path}")

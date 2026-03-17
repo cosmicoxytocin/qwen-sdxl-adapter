@@ -1,172 +1,85 @@
-"""Main training entry point for the QWEN-SDXL-Adapter."""
+"""Phase 2: Diff2Flow Compositional Fine-Tuning.
+
+This script trains the Causal-to-Spatial Perceiver Bridge on image data
+using Aspect Ratio Bucketed (ARB) pre-cached safetensors.
+"""
 
 import argparse
-import random
-import sys
 import os
-
+import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from typing import List
-
-import numpy as np
 import torch
+from diffusers import UNet2DConditionModel, AutoencoderKL, DDPMScheduler
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from diffusers import UNet2DConditionModel, DDPMScheduler, AutoencoderKL
 
-from src.models.bridge import CausalToSpatialPerceiverBridge
-from src.models.sampler import Diff2FlowEulerSampler
-from src.config import load_config, ExperimentConfig
+from src.config import load_config
 from src.data.dataset import create_dataloader
+from src.models.bridge import CausalToSpatialPerceiverBridge
 from src.training.loss import Diff2FlowAlignmentLoss
-from src.training.trainer import AdapterTrainer
-from src.utils.logger import WandbLogger
+from src.training.trainer import Trainer
 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to phase 1 adapter weights")
+    args = parser.parse_args()
 
-def set_seed(seed: int):
-    """Sets the random seed for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def main(config: ExperimentConfig) -> None:
-    """Main training function."""
-    # 1. Device & Reproducibility
+    config = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    set_seed(config.training.seed)
+    dtype = torch.bfloat16
 
-    print(f"Initializing Qwen-SDXL Adapter Training on device: {device}")
-    print(f"Mixed Precision: {config.training.mixed_precision}")
-
-    # 2. Logger initialization
-    logger = WandbLogger(config)
-
-    # 3. Load frozen SDXL Unet and Noise Scheduler
-    # Load UNet directly into the the target precision to save RAM/VRAM during init
-    unet_dtype = torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float16
-
-    if getattr(config.model, "sdxl_single_file_ckpt", None):
-        print(
-            f"Loading SDXL Unet from: {config.model.sdxl_single_file_ckpt} with dtype={unet_dtype}..."
-        )
-        unet = UNet2DConditionModel.from_single_file(
-            config.model.sdxl_single_file_ckpt, torch_dtype=unet_dtype
-        ).to(device)
-    else:
-        print(f"Loading SDXL Unet from Hugging Face with dtype={unet_dtype}...")
-        unet = UNet2DConditionModel.from_pretrained(
-            config.model.sdxl_model_id, subfolder="unet", torch_dtype=unet_dtype
-        ).to(device)
-
-    # Freeze UNet parameters
+    print("1. Loading Frozen SDXL UNet to GPU...")
+    unet = UNet2DConditionModel.from_pretrained(
+        config.model.sdxl_model_id, subfolder="unet", torch_dtype=dtype
+    ).to(device).eval()
     unet.requires_grad_(False)
-    unet.eval()
+    
+    if config.training.gradient_checkpointing:
+        unet.enable_gradient_checkpointing()
 
-    # Load the scheduler to extract the beta schedule for Diff2Flow logic
-    noise_scheduler = DDPMScheduler.from_pretrained(
-        config.model.sdxl_model_id,
-        subfolder="scheduler",
-    )
-
-    # 4. Instantiate trainable adapter model
-    print("Initializing Causal-to-Spatial Perceiver Bridge...")
+    print("2. Loading Pre-Trained CSPB Adapter to GPU...")
     adapter = CausalToSpatialPerceiverBridge(
-        depth=config.model.adapter_depth,
-        qwen_dim=1024,  # Fixed for Qwen3.5-0.8B-Base
-        internal_dim=config.model.adapter_dim,
-        sdxl_context_dim=config.model.sdxl_context_dim,
-        sdxl_pooled_dim=config.model.sdxl_pooled_dim,
-        num_queries=config.model.num_latent_queries,
-    ).to(device)
-
-    # Ensure adapter is in training mode and requires gradients
+        depth=6, qwen_dim=1024, internal_dim=1024, sdxl_context_dim=2048, sdxl_pooled_dim=1280, num_queries=78
+    ).to(device, dtype=dtype)
     adapter.train()
-    adapter.requires_grad_(True)
 
-    # 5. Instantiate Diff2Flow Objective
-    print("Setting up Diff2Flow Alignment Objective...")
-    objective = Diff2FlowAlignmentLoss(noise_scheduler=noise_scheduler, device=device)
+    if args.resume_from_checkpoint:
+        print(f"   -> Resuming adapter from: {args.resume_from_checkpoint}")
+        from safetensors.torch import load_file
+        adapter.load_state_dict(load_file(args.resume_from_checkpoint))
 
-    # 6. Runtime validation
-    qwen = tokenizer = vae = sampler = None
-    if config.training.validation_steps > 0:
-        print("Loading Qwen and VAE into VRAM for runtime validation...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.model.qwen_model_id, trust_remote_code=True
-        )
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
+    print("3. Loading Validation Models (Qwen & VAE) to CPU (Zero VRAM footprint)...")
+    tokenizer = AutoTokenizer.from_pretrained(config.model.qwen_model_id, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    qwen = AutoModelForCausalLM.from_pretrained(config.model.qwen_model_id, torch_dtype=dtype).to("cpu").eval()
+    vae = AutoencoderKL.from_pretrained(config.model.sdxl_vae_id, torch_dtype=torch.float16).to("cpu").eval()
+    qwen.requires_grad_(False)
+    vae.requires_grad_(False)
 
-        qwen = AutoModelForCausalLM.from_pretrained(
-            config.model.qwen_model_id, torch_dtype=unet_dtype
-        ).to(device)
-        qwen.eval()
-        qwen.requires_grad_(False)
+    print("4. Initializing Aspect Ratio Dataloader...")
+    dataloader = create_dataloader(config.data)
 
-        vae = AutoencoderKL.from_pretrained(
-            "madebyollin/sdxl-vae-fp16-fix", torch_dtype=unet_dtype
-        ).to(device)
-        vae.eval()
-        vae.requires_grad_(False)
+    print("5. Initializing Diff2Flow Objective & Trainer...")
+    noise_scheduler = DDPMScheduler.from_pretrained(config.model.sdxl_model_id, subfolder="scheduler")
+    objective = Diff2FlowAlignmentLoss(noise_scheduler, device)
 
-        sampler = Diff2FlowEulerSampler(noise_scheduler, device)
-
-    # 7. Initialize DataLoader
-    print(f"Loading cached dataset from {config.data.cache_dir}...")
-    train_dataloader = create_dataloader(config.data)
-
-    # 8. Initialize & Run Trainer
-    print("Starting training loop...")
-    trainer = AdapterTrainer(
-        config=config,
-        adapter=adapter,
+    trainer = Trainer(
         unet=unet,
-        objective=objective,
-        train_dataloader=train_dataloader,
-        device=device,
+        adapter=adapter,
         qwen=qwen,
-        tokenizer=tokenizer,
         vae=vae,
-        sampler=sampler,
+        tokenizer=tokenizer,
+        dataloader=dataloader,
+        objective=objective,
+        config=config,
+        device=device,
+        dtype=dtype,
     )
-    try:
-        trainer.train()
-    except KeyboardInterrupt:
-        print("\nTraining interrupted by user. Saving current model state...")
-        trainer.save_checkpoint()
-    except Exception as e:
-        print(f"\nTraining failed with error: {e}")
-        raise e
-    finally:
-        logger.finish()
 
-
-def parse_args(args: List[str]) -> argparse.Namespace:
-    """Parses command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Train the Qwen-SDXL Adapter with Diff2Flow Alignment."
-    )
-    parser.add_argument(
-        "--config", type=str, default=None, help="Path to the YAML configuration file."
-    )
-    parser.add_argument(
-        "overrides",
-        nargs=argparse.REMAINDER,
-        help="Override config parameters (e.g., training.learning_rate=2e-4)",
-    )
-    return parser.parse_args(args)
-
+    print("🚀 Starting Phase 2 Training...")
+    trainer.train()
 
 if __name__ == "__main__":
-    # Parse command line arguments
-    parsed_args = parse_args(sys.argv[1:])
-
-    # Load and merge configuration (Defaults <- YAML <- CLI Overrides)
-    experiment_config = load_config(yaml_path=parsed_args.config, cli_args=parsed_args.overrides)
-
-    # Execute the training loop
-    main(experiment_config)
+    main()
