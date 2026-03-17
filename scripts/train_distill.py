@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import wandb
 from transformers import (
     AutoTokenizer,
@@ -88,7 +88,7 @@ def main():
 
     # Training Loop
     print("5. Starting distillation training loop...")
-    progress_bar = tqdm(total=num_steps, desc="Distillation Training")
+    progress_bar = tqdm(total=num_steps, desc="Distilling", mininterval=1.0)
 
     global_step = 0
     os.makedirs(args.output_dir, exist_ok=True)
