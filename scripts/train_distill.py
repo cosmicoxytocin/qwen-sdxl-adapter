@@ -61,7 +61,7 @@ def main():
         internal_dim=1024,
         sdxl_context_dim=2048,
         sdxl_pooled_dim=1280,
-        num_queries=77
+        num_queries=78
     ).to(device, dtype=dtype)
     adapter.train()
 
