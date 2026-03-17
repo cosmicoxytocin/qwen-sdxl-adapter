@@ -144,11 +144,14 @@ class AdapterTrainer:
                 prompts, padding="max_length", truncation=True, max_length=256, return_tensors="pt"
             ).to(self.device)
 
+            input_ids = encoded.input_ids[:2, :256]  # Ensure max_length
+            attention_mask = encoded.attention_mask[:2, :256]
+
             qwen_outputs = self.qwen.model(
-                input_ids=encoded.input_ids, attention_mask=encoded.attention_mask, return_dict=True
+                input_ids=input_ids, attention_mask=attention_mask, return_dict=True
             )
             hidden_states = qwen_outputs.last_hidden_state.to(self.dtype)
-            mask = encoded.attention_mask.bool()
+            mask = attention_mask.bool()
 
             with torch.autocast(
                 device_type=self.device.type, dtype=self.dtype, enabled=self.use_amp
