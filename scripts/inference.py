@@ -140,35 +140,32 @@ class QwenSDXLPipeline:
         progress_bar = tqdm(total=num_inference_steps, desc="Sampling")
         
         for i in range(num_inference_steps):
-            linear_t = i * dt
+            t_curr = i / num_inference_steps
+            t_next = (i + 1) / num_inference_steps
+
+            fm_t_curr = apply_flow_shift(t_curr, shift=shift)
+            fm_t_next = apply_flow_shift(t_next, shift=shift)
+
+            dt_shifted = fm_t_next - fm_t_curr
             
-            # Apply Flow Matching Shift
-            fm_t = apply_flow_shift(linear_t, shift=shift)
-            fm_t_tensor = torch.tensor([fm_t, fm_t], dtype=torch.float32, device=self.device)
-            
-            # Duplicate latent for CFG
-            x_in = torch.cat([x, x], dim=0)
-            
-            # Convert Flow Matching to Diffusion scale for UNet
+            fm_t_tensor = torch.tensor([fm_t_curr, fm_t_next], dtype=torch.float32, device=self.device)
+            x_in = torch.cat([x, x], dim=0)  # Duplicate for uncond/cond
+
             dm_t, dm_x = self.sampler.convert_fm_to_dm(fm_t_tensor, x_in)
-            
+
             with torch.autocast(device_type=self.device.type, dtype=self.dtype):
                 eps_pred = self.unet(
-                    dm_x.to(self.dtype), 
-                    dm_t.to(self.dtype), 
-                    encoder_hidden_states=adapter_ctx, 
+                    dm_x.to(self.dtype),
+                    dm_t.to(self.dtype),
+                    encoder_hidden_states=adapter_ctx,
                     added_cond_kwargs=added_cond_kwargs
                 ).sample
-                
-            # Convert back to velocity
-            v_pred = self.sampler.predict_velocity(dm_t, dm_x, eps_pred)
             
-            # Apply CFG
+            v_pred = self.sampler.predict_velocity(dm_t, dm_x, eps_pred)
             v_uncond, v_cond = v_pred.chunk(2)
             v_cfg = v_uncond + cfg_scale * (v_cond - v_uncond)
-            
-            # Euler Step
-            x = x + v_cfg.to(self.dtype) * dt
+
+            x = x + v_cfg.to(self.dtype) * dt_shifted
             progress_bar.update(1)
             
         progress_bar.close()
