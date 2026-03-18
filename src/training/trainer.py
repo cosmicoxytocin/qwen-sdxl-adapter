@@ -39,7 +39,11 @@ class Trainer:
         self.epoch = 0
 
         if config.logging.use_wandb:
-            wandb.init(project=config.logging.wandb_project, config=config.dict())
+            from omegaconf import OmegaConf
+            wandb.init(
+                project=config.logging.wandb_project,
+                config=OmegaConf.to_container(config, resolve=True)
+            )
 
     def train(self):
         progress_bar = tqdm(total=self.config.training.max_train_steps, desc="Training")
