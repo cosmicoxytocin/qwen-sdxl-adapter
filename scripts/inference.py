@@ -39,7 +39,7 @@ class QwenSDXLPipeline:
         self.qwen = AutoModelForCausalLM.from_pretrained(qwen_id, torch_dtype=self.dtype).to(self.device).eval()
 
         print("Loading UNet...")
-        self.unet = UNet2DConditionModel.froom_pretrained(unet_path, subfolder="unet", torch_dtype=self.dtype).to(self.device).eval()
+        self.unet = UNet2DConditionModel.from_pretrained(unet_path, subfolder="unet", torch_dtype=self.dtype).to(self.device).eval()
 
         print("Loading Adapter...")
         self.adapter = CausalToSpatialPerceiverBridge(
