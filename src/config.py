@@ -35,9 +35,7 @@ class TrainingConfig:
     gradient_checkpointing: bool = True
     validation_steps: int = 500
     checkpointing_steps: int = 500
-    validation_prompts: List[str] = field(
-        default_factory=lambda: [""]
-    )
+    validation_prompts: List[str] = field(default_factory=lambda: [""])
 
 
 @dataclass

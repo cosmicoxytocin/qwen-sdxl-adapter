@@ -20,14 +20,16 @@ class CachedAdapterDataset(Dataset):
         meta_path = os.path.join(config.cache_dir, "meta.json")
 
         if not os.path.exists(meta_path):
-            raise FileNotFoundError(f"Metadata index not found at {meta_path}. Please run the caching script first.")
-        
+            raise FileNotFoundError(
+                f"Metadata index not found at {meta_path}. Please run the caching script first."
+            )
+
         with open(meta_path, "r") as f:
             self.metadata = json.load(f)
-    
+
     def __len__(self):
         return len(self.metadata)
-    
+
     def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
         item_meta = self.metadata[idx]
         file_path = item_meta["path"]
@@ -54,14 +56,17 @@ class CachedAdapterDataset(Dataset):
 
 class AspectRatioBatchSampler(Sampler[List[int]]):
     """
-    Groups dataset indices by their aspect ratio buckets and yields 
+    Groups dataset indices by their aspect ratio buckets and yields
     batches that are guaranteed to have identical latent spatial dimensions.
     """
-    def __init__(self, dataset: CachedAdapterDataset, batch_size: int, drop_last: bool = True) -> None:
+
+    def __init__(
+        self, dataset: CachedAdapterDataset, batch_size: int, drop_last: bool = True
+    ) -> None:
         self.dataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
-        
+
         # Group indices by bucket string (e.g., "1024x1024": [0, 5, 12...])
         self.buckets: Dict[str, List[int]] = {}
         for idx, item in enumerate(self.dataset.metadata):
@@ -72,19 +77,19 @@ class AspectRatioBatchSampler(Sampler[List[int]]):
 
     def __iter__(self) -> Iterator[List[int]]:
         batches = []
-        
+
         # Create batches for each bucket individually
         for bucket_key, indices in self.buckets.items():
-            random.shuffle(indices) # Shuffle images within the bucket
-            
+            random.shuffle(indices)  # Shuffle images within the bucket
+
             for i in range(0, len(indices), self.batch_size):
                 batch = indices[i : i + self.batch_size]
                 if len(batch) == self.batch_size or not self.drop_last:
                     batches.append(batch)
-                    
+
         # Shuffle the order of the batches so the model doesn't overfit to one aspect ratio at a time
         random.shuffle(batches)
-        
+
         for batch in batches:
             yield batch
 
@@ -107,9 +112,7 @@ def create_dataloader(config: DataConfig) -> DataLoader:
     # Because we are using a custom batch sampler, we cannot use shuffle=True or batch_size
     # in the main DataLoader kwargs. The sampler handles both.
     batch_sampler = AspectRatioBatchSampler(
-        dataset=dataset, 
-        batch_size=config.batch_size, 
-        drop_last=drop_last
+        dataset=dataset, batch_size=config.batch_size, drop_last=drop_last
     )
 
     return DataLoader(

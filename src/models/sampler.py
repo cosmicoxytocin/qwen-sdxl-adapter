@@ -30,7 +30,9 @@ class Diff2FlowEulerSampler:
         )
         self.rectified_alphas_flipped = torch.flip(self.rectified_alphas, dims=[0])
 
-    def convert_fm_to_dm(self, fm_t: torch.Tensor, fm_x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def convert_fm_to_dm(
+        self, fm_t: torch.Tensor, fm_x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Maps Flow Matching (t, x) to Diffusion Model (t, x)."""
         right_index = torch.searchsorted(self.rectified_alphas_flipped, fm_t, right=True)
         left_index = right_index - 1
@@ -48,7 +50,9 @@ class Diff2FlowEulerSampler:
         dm_x = fm_x * scale_t.view(-1, 1, 1, 1)
         return dm_t, dm_x
 
-    def predict_velocity(self, dm_t: torch.Tensor, dm_x: torch.Tensor, eps_pred: torch.Tensor) -> torch.Tensor:
+    def predict_velocity(
+        self, dm_t: torch.Tensor, dm_x: torch.Tensor, eps_pred: torch.Tensor
+    ) -> torch.Tensor:
         """Converts DM epsilon prediction to FM velocity."""
         t_idx = dm_t.long().clamp(0, self.num_timesteps - 1)
         recip_alpha = self.sqrt_recip_alphas_cumprod[t_idx].view(-1, 1, 1, 1)
