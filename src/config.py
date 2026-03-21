@@ -10,8 +10,12 @@ from omegaconf import OmegaConf
 class ModelConfig:
     sdxl_model_id: str = "stabilityai/stable-diffusion-xl-base-1.0"
     qwen_model_id: str = "Qwen/Qwen3.5-0.8B-Base"
-    # FIX: Added the VAE ID for Phase 2 CPU/GPU juggling
     sdxl_vae_id: str = "madebyollin/sdxl-vae-fp16-fix"
+    adapter_depth: int = 6
+    adapter_dim: int = 1024
+    sdxl_context_dim: int = 2048
+    sdxl_pooled_dim: int = 1280
+    num_latent_queries: int = 78
 
 
 @dataclass
