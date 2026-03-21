@@ -45,6 +45,7 @@ class QwenSDXLPipeline:
         self.adapter = CausalToSpatialPerceiverBridge(
             depth=6,
             qwen_dim=1024,
+            internal_dim=1024,
             sdxl_context_dim=2048,
             sdxl_pooled_dim=1280,
             num_queries=78
